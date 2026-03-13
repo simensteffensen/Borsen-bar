@@ -1,0 +1,604 @@
+// TaxMate - Production Crypto Tax Platform for Norway
+// Prisma Schema v1.0
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// ─────────────────────────────────────────────
+// AUTH & USERS
+// ─────────────────────────────────────────────
+
+model User {
+  id                String      @id @default(cuid())
+  clerkId           String      @unique
+  email             String      @unique
+  name              String?
+  residencyCountry  String      @default("NO")
+  preferredCurrency String      @default("NOK")
+  role              UserRole    @default(INDIVIDUAL)
+  createdAt         DateTime    @default(now())
+  updatedAt         DateTime    @updatedAt
+
+  workspaces      WorkspaceMember[]
+  ownedWorkspaces Workspace[]  @relation("WorkspaceOwner")
+  auditLogs       AuditLog[]
+
+  @@map("users")
+}
+
+enum UserRole {
+  INDIVIDUAL
+  ACCOUNTANT
+  ADMIN
+}
+
+// ─────────────────────────────────────────────
+// WORKSPACES
+// ─────────────────────────────────────────────
+
+model Workspace {
+  id           String   @id @default(cuid())
+  ownerId      String
+  owner        User     @relation("WorkspaceOwner", fields: [ownerId], references: [id])
+  name         String
+  taxCountry   String   @default("NO")
+  baseCurrency String   @default("NOK")
+  settings     Json     @default("{}")
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  members           WorkspaceMember[]
+  dataSources       DataSource[]
+  accounts          Account[]
+  rawImportRecords  RawImportRecord[]
+  transactions      CanonicalTransaction[]
+  transactionGroups TransactionGroup[]
+  taxLots           TaxLot[]
+  disposalMatches   DisposalMatch[]
+  pricePoints       PricePoint[]
+  taxReports        TaxReport[]
+  issues            Issue[]
+  manualAdjustments ManualAdjustment[]
+  auditLogs         AuditLog[]
+
+  @@map("workspaces")
+}
+
+model WorkspaceMember {
+  id          String              @id @default(cuid())
+  workspaceId String
+  workspace   Workspace           @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  userId      String
+  user        User                @relation(fields: [userId], references: [id])
+  role        WorkspaceMemberRole @default(VIEWER)
+  createdAt   DateTime            @default(now())
+
+  @@unique([workspaceId, userId])
+  @@map("workspace_members")
+}
+
+enum WorkspaceMemberRole {
+  OWNER
+  EDITOR
+  VIEWER
+  ACCOUNTANT
+}
+
+// ─────────────────────────────────────────────
+// DATA SOURCES & RAW IMPORTS
+// ─────────────────────────────────────────────
+
+model DataSource {
+  id             String         @id @default(cuid())
+  workspaceId    String
+  workspace      Workspace      @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  type           DataSourceType
+  providerName   String
+  label          String
+  importMetadata Json           @default("{}")
+  syncStatus     SyncStatus     @default(IDLE)
+  lastSyncedAt   DateTime?
+  encryptedCreds String?
+  createdAt      DateTime       @default(now())
+  updatedAt      DateTime       @updatedAt
+
+  rawImportRecords RawImportRecord[]
+  accounts         Account[]
+
+  @@map("data_sources")
+}
+
+enum DataSourceType {
+  EXCHANGE_API
+  EXCHANGE_CSV
+  WALLET_ADDRESS
+  BLOCKCHAIN_ADDRESS
+  MANUAL
+}
+
+enum SyncStatus {
+  IDLE
+  PENDING
+  RUNNING
+  SUCCESS
+  FAILED
+  PARTIAL
+}
+
+model RawImportRecord {
+  id           String     @id @default(cuid())
+  workspaceId  String
+  workspace    Workspace  @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  dataSourceId String
+  dataSource   DataSource @relation(fields: [dataSourceId], references: [id], onDelete: Cascade)
+  externalId   String?
+  rawPayload   Json
+  importedAt   DateTime   @default(now())
+  checksum     String
+
+  canonicalTransaction CanonicalTransaction?
+
+  @@unique([dataSourceId, checksum])
+  @@map("raw_import_records")
+}
+
+// ─────────────────────────────────────────────
+// ASSETS
+// ─────────────────────────────────────────────
+
+model Asset {
+  id              String   @id @default(cuid())
+  symbol          String
+  name            String?
+  chain           String?
+  contractAddress String?
+  coingeckoId     String?
+  decimals        Int      @default(18)
+  isNft           Boolean  @default(false)
+  isStablecoin    Boolean  @default(false)
+  wrappedMetadata Json?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  pricePoints     PricePoint[]
+  taxLots         TaxLot[]
+  transactions    CanonicalTransaction[]
+  feeTransactions CanonicalTransaction[] @relation("FeeAsset")
+
+  @@unique([symbol, chain, contractAddress])
+  @@map("assets")
+}
+
+// ─────────────────────────────────────────────
+// ACCOUNTS / WALLETS
+// ─────────────────────────────────────────────
+
+model Account {
+  id           String      @id @default(cuid())
+  workspaceId  String
+  workspace    Workspace   @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  dataSourceId String?
+  dataSource   DataSource? @relation(fields: [dataSourceId], references: [id])
+  accountType  AccountType
+  chain        String?
+  address      String?
+  label        String?
+  isUserOwned  Boolean     @default(true)
+  createdAt    DateTime    @default(now())
+  updatedAt    DateTime    @updatedAt
+
+  outboundTransactions CanonicalTransaction[] @relation("SourceAccount")
+  inboundTransactions  CanonicalTransaction[] @relation("DestinationAccount")
+
+  @@map("accounts")
+}
+
+enum AccountType {
+  EXCHANGE
+  WALLET
+  DEFI_PROTOCOL
+  EXTERNAL
+  UNKNOWN
+}
+
+// ─────────────────────────────────────────────
+// TRANSACTION GROUPS
+// ─────────────────────────────────────────────
+
+model TransactionGroup {
+  id          String               @id @default(cuid())
+  workspaceId String
+  workspace   Workspace            @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  type        TransactionGroupType
+  label       String?
+  metadata    Json                 @default("{}")
+  createdAt   DateTime             @default(now())
+
+  transactions CanonicalTransaction[]
+
+  @@map("transaction_groups")
+}
+
+enum TransactionGroupType {
+  BUY
+  SELL
+  SWAP
+  TRANSFER
+  BRIDGE
+  LP_DEPOSIT
+  LP_WITHDRAWAL
+  STAKING_DEPOSIT
+  STAKING_WITHDRAWAL
+  STAKING_REWARD
+  LENDING_DEPOSIT
+  LENDING_WITHDRAWAL
+  LENDING_INTEREST
+  AIRDROP
+  MINING_REWARD
+  NFT_PURCHASE
+  NFT_SALE
+  UNKNOWN
+}
+
+// ─────────────────────────────────────────────
+// CANONICAL TRANSACTIONS
+// ─────────────────────────────────────────────
+
+model CanonicalTransaction {
+  id                   String            @id @default(cuid())
+  workspaceId          String
+  workspace            Workspace         @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  rawRecordId          String?           @unique
+  rawRecord            RawImportRecord?  @relation(fields: [rawRecordId], references: [id])
+  txHash               String?
+  externalTxId         String?
+  timestamp            DateTime
+  sourceAccountId      String?
+  sourceAccount        Account?          @relation("SourceAccount", fields: [sourceAccountId], references: [id])
+  destinationAccountId String?
+  destinationAccount   Account?          @relation("DestinationAccount", fields: [destinationAccountId], references: [id])
+  transactionGroupId   String?
+  transactionGroup     TransactionGroup? @relation(fields: [transactionGroupId], references: [id])
+  type                 TransactionType
+  subtype              String?
+  assetId              String
+  asset                Asset             @relation(fields: [assetId], references: [id])
+  amount               Decimal           @db.Decimal(36, 18)
+  feeAssetId           String?
+  feeAsset             Asset?            @relation("FeeAsset", fields: [feeAssetId], references: [id])
+  feeAmount            Decimal?          @db.Decimal(36, 18)
+  fiatCurrency         String            @default("NOK")
+  fiatValue            Decimal?          @db.Decimal(20, 4)
+  fiatValueSource      PriceSource?
+  pricePerUnit         Decimal?          @db.Decimal(30, 10)
+  direction            Direction
+  taxable              Boolean?
+  notes                String?
+  confidenceScore      Decimal?          @db.Decimal(5, 4)
+  status               TxStatus          @default(NORMALIZED)
+  metadata             Json              @default("{}")
+  createdAt            DateTime          @default(now())
+  updatedAt            DateTime          @updatedAt
+
+  taxLots         TaxLot[]
+  disposalMatches DisposalMatch[]
+  issues          Issue[]
+
+  @@index([workspaceId, timestamp])
+  @@index([workspaceId, type])
+  @@index([workspaceId, status])
+  @@map("canonical_transactions")
+}
+
+enum TransactionType {
+  FIAT_DEPOSIT
+  FIAT_WITHDRAWAL
+  CRYPTO_DEPOSIT
+  CRYPTO_WITHDRAWAL
+  MARKET_BUY
+  MARKET_SELL
+  SPOT_SWAP
+  FEE
+  REFERRAL_REWARD
+  CASHBACK
+  INTEREST
+  RECEIVE
+  SEND
+  SELF_TRANSFER
+  BRIDGE_OUT
+  BRIDGE_IN
+  SMART_CONTRACT_INTERACTION
+  TOKEN_APPROVAL
+  WRAPPED_TOKEN_MINT
+  WRAPPED_TOKEN_BURN
+  LP_DEPOSIT
+  LP_WITHDRAWAL
+  STAKING_DEPOSIT
+  STAKING_WITHDRAWAL
+  STAKING_REWARD
+  LENDING_DEPOSIT
+  LENDING_WITHDRAWAL
+  LENDING_INTEREST
+  BORROW
+  REPAYMENT
+  LIQUIDATION
+  YIELD_FARMING_REWARD
+  GOVERNANCE_REWARD
+  REBASING_EVENT
+  VAULT_DEPOSIT
+  VAULT_WITHDRAWAL
+  NFT_PURCHASE
+  NFT_SALE
+  NFT_MINT
+  ROYALTY_INCOME
+  MARKETPLACE_FEE
+  AIRDROP
+  MINING_REWARD
+  HARD_FORK
+  TOKEN_MIGRATION
+  BURN
+  GIFT_OUT
+  GIFT_IN
+  LOST_ASSET
+  MANUAL_ADJUSTMENT
+  UNKNOWN
+}
+
+enum Direction {
+  IN
+  OUT
+  INTERNAL
+}
+
+enum TxStatus {
+  NORMALIZED
+  FLAGGED
+  RESOLVED
+  IGNORED
+}
+
+enum PriceSource {
+  COINGECKO_DIRECT
+  COINGECKO_USD_NOK
+  COINGECKO_INDIRECT
+  EXCHANGE_REPORTED
+  USER_MANUAL
+  ESTIMATED
+  STABLECOIN_PEGGED
+}
+
+// ─────────────────────────────────────────────
+// COST BASIS / TAX LOTS
+// ─────────────────────────────────────────────
+
+model TaxLot {
+  id              String               @id @default(cuid())
+  workspaceId     String
+  workspace       Workspace            @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  assetId         String
+  asset           Asset                @relation(fields: [assetId], references: [id])
+  acquisitionTxId String
+  acquisitionTx   CanonicalTransaction @relation(fields: [acquisitionTxId], references: [id])
+  acquisitionDate DateTime
+  originalAmount  Decimal              @db.Decimal(36, 18)
+  remainingAmount Decimal              @db.Decimal(36, 18)
+  costBasisNok    Decimal              @db.Decimal(20, 4)
+  sourceType      TaxLotSource
+  taxYear         Int
+  createdAt       DateTime             @default(now())
+  updatedAt       DateTime             @updatedAt
+
+  disposalMatches DisposalMatch[]
+
+  @@index([workspaceId, assetId])
+  @@index([workspaceId, taxYear])
+  @@map("tax_lots")
+}
+
+enum TaxLotSource {
+  PURCHASE
+  REWARD
+  AIRDROP
+  MINING
+  GIFT
+  FORK
+  MIGRATION
+  MANUAL
+}
+
+model DisposalMatch {
+  id                    String               @id @default(cuid())
+  workspaceId           String
+  workspace             Workspace            @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  disposalTxId          String
+  disposalTx            CanonicalTransaction @relation(fields: [disposalTxId], references: [id])
+  taxLotId              String
+  taxLot                TaxLot               @relation(fields: [taxLotId], references: [id])
+  matchedAmount         Decimal              @db.Decimal(36, 18)
+  allocatedCostBasisNok Decimal              @db.Decimal(20, 4)
+  proceedsNok           Decimal              @db.Decimal(20, 4)
+  gainLossNok           Decimal              @db.Decimal(20, 4)
+  costingMethod         CostingMethod
+  createdAt             DateTime             @default(now())
+
+  @@map("disposal_matches")
+}
+
+enum CostingMethod {
+  FIFO
+  LIFO
+  HIFO
+  SPECIFIC_ID
+}
+
+// ─────────────────────────────────────────────
+// PRICING
+// ─────────────────────────────────────────────
+
+model PricePoint {
+  id              String      @id @default(cuid())
+  workspaceId     String?
+  workspace       Workspace?  @relation(fields: [workspaceId], references: [id])
+  assetId         String
+  asset           Asset       @relation(fields: [assetId], references: [id])
+  timestampBucket DateTime
+  currency        String      @default("NOK")
+  price           Decimal     @db.Decimal(30, 10)
+  source          PriceSource
+  confidence      Decimal     @db.Decimal(5, 4) @default(1.0)
+  createdAt       DateTime    @default(now())
+
+  @@unique([assetId, timestampBucket, currency, source])
+  @@index([assetId, timestampBucket])
+  @@map("price_points")
+}
+
+// ─────────────────────────────────────────────
+// TAX REPORTS
+// ─────────────────────────────────────────────
+
+model TaxReport {
+  id          String       @id @default(cuid())
+  workspaceId String
+  workspace   Workspace    @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  taxYear     Int
+  reportType  ReportType
+  summary     Json         @default("{}")
+  assumptions Json         @default("{}")
+  status      ReportStatus @default(DRAFT)
+  generatedAt DateTime     @default(now())
+  version     Int          @default(1)
+  isOutdated  Boolean      @default(false)
+
+  @@index([workspaceId, taxYear])
+  @@map("tax_reports")
+}
+
+enum ReportType {
+  TAX_SUMMARY
+  DISPOSAL_REPORT
+  HOLDINGS_REPORT
+  TRANSACTION_LEDGER
+  ISSUES_REPORT
+  PRIOR_YEAR_CORRECTION
+}
+
+enum ReportStatus {
+  DRAFT
+  FINAL
+  OUTDATED
+}
+
+// ─────────────────────────────────────────────
+// ISSUES
+// ─────────────────────────────────────────────
+
+model Issue {
+  id                  String                @id @default(cuid())
+  workspaceId         String
+  workspace           Workspace             @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  severity            IssueSeverity
+  type                IssueType
+  linkedTxId          String?
+  linkedTx            CanonicalTransaction? @relation(fields: [linkedTxId], references: [id])
+  linkedEntityType    String?
+  linkedEntityId      String?
+  title               String
+  description         String
+  resolutionStatus    ResolutionStatus      @default(OPEN)
+  suggestedResolution Json?
+  resolvedAt          DateTime?
+  resolvedById        String?
+  createdAt           DateTime              @default(now())
+  updatedAt           DateTime              @updatedAt
+
+  @@index([workspaceId, resolutionStatus])
+  @@index([workspaceId, type])
+  @@map("issues")
+}
+
+enum IssueSeverity {
+  CRITICAL
+  WARNING
+  INFO
+}
+
+enum IssueType {
+  MISSING_COST_BASIS
+  UNMATCHED_TRANSFER
+  DUPLICATE_TRANSACTION
+  MISSING_PRICE
+  UNKNOWN_ASSET
+  UNCLASSIFIED_TX
+  IMPOSSIBLE_BALANCE
+  DISPOSAL_EXCEEDS_HOLDINGS
+  PARTIAL_HISTORY
+  TIMESTAMP_MISMATCH
+  AMBIGUOUS_OWNERSHIP
+  FEE_INCONSISTENCY
+  UNSUPPORTED_TX_TYPE
+}
+
+enum ResolutionStatus {
+  OPEN
+  IN_PROGRESS
+  RESOLVED
+  IGNORED
+}
+
+// ─────────────────────────────────────────────
+// MANUAL ADJUSTMENTS
+// ─────────────────────────────────────────────
+
+model ManualAdjustment {
+  id          String         @id @default(cuid())
+  workspaceId String
+  workspace   Workspace      @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  type        AdjustmentType
+  entityType  String
+  entityId    String?
+  data        Json
+  reason      String?
+  createdById String
+  createdAt   DateTime       @default(now())
+
+  @@map("manual_adjustments")
+}
+
+enum AdjustmentType {
+  CLASSIFICATION_OVERRIDE
+  PRICE_OVERRIDE
+  ACQUISITION_ADDITION
+  DISPOSAL_ADDITION
+  TRANSFER_MATCH
+  ASSET_MAPPING
+  EXCLUDE_TRANSACTION
+  BALANCE_CORRECTION
+}
+
+// ─────────────────────────────────────────────
+// AUDIT LOG
+// ─────────────────────────────────────────────
+
+model AuditLog {
+  id          String     @id @default(cuid())
+  workspaceId String?
+  workspace   Workspace? @relation(fields: [workspaceId], references: [id])
+  userId      String
+  user        User       @relation(fields: [userId], references: [id])
+  action      String
+  entityType  String?
+  entityId    String?
+  before      Json?
+  after       Json?
+  metadata    Json?
+  createdAt   DateTime   @default(now())
+
+  @@index([workspaceId, createdAt])
+  @@map("audit_logs")
+}
